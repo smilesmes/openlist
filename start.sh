@@ -1,6 +1,19 @@
 #!/bin/sh
-# PaaS 常注入 $PORT 并要求应用监听它，而 OpenList 只认 HTTP_PORT
-if [ -n "$PORT" ]; then
-  export HTTP_PORT="$PORT"
+set -eu
+
+# Infrlo 若注入 PORT，则让 OpenList 监听该端口；
+# 未注入时保留 OpenList 默认端口 5244。
+if [ -n "${PORT:-}" ]; then
+    case "$PORT" in
+        ''|*[!0-9]*)
+            echo "Invalid PORT: $PORT" >&2
+            exit 1
+            ;;
+        *)
+            export HTTP_PORT="$PORT"
+            ;;
+    esac
 fi
-exec ./openlist server --no-prefix
+
+echo "Starting OpenList on HTTP_PORT=${HTTP_PORT:-5244}"
+exec /opt/openlist/openlist server --no-prefix
