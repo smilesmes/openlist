@@ -1,33 +1,111 @@
 #!/bin/sh
 set -eu
 
-# Orkestr 如果注入 PORT，就让 OpenList 使用该端口。
-# 没有 PORT 时使用官方默认端口 5244。
+# 端口
 if [ -n "${PORT:-}" ]; then
     export HTTP_PORT="$PORT"
 else
     export HTTP_PORT="${HTTP_PORT:-5244}"
 fi
 
-# Orkestr PostgreSQL 附加组件会注入 DATABASE_URL。
-# OpenList 使用 DB_DSN 接收 PostgreSQL 连接字符串。
-if [ -n "${DATABASE_URL:-}" ]; then
-    export DB_TYPE="postgres"
-    export DB_DSN="$DATABASE_URL"
-fi
-
-# 使用临时目录，避免官方镜像检查 /opt/openlist/data 时遇到权限问题。
+# 手写配置文件，绕开 DSN 解析问题
 mkdir -p /tmp/openlist-data
 mkdir -p /tmp/openlist-temp
 mkdir -p /tmp/openlist-bleve
 
-export TEMP_DIR="/tmp/openlist-temp"
-export BLEVE_DIR="/tmp/openlist-bleve"
+# 从 DATABASE_URL 中提取各字段
+DB_TYPE_VALUE="sqlite3"
+DB_HOST_VALUE=""
+DB_PORT_VALUE="5432"
+DB_USER_VALUE=""
+DB_PASS_VALUE=""
+DB_NAME_VALUE=""
+DB_SSL_VALUE="disable"
 
-echo "Starting OpenList on port ${HTTP_PORT}"
-echo "Database type: ${DB_TYPE:-sqlite3}"
+if [ -n "${DATABASE_URL:-}" ]; then
+    DB_TYPE_VALUE="postgres"
 
-exec /opt/openlist/openlist \
-    server \
+    # 按 URL 结构解析: scheme://user:pass@host:port/dbname?params
+    REST="${DATABASE_URL#*://}"          # user:pass@host:port/dbname?params
+    CRED="${REST%%@*}"                   # user:pass
+    HOSTPART="${REST#*@}"                # host:port/dbname?params
+
+    DB_USER_VALUE="${CRED%%:*}"
+    DB_PASS_VALUE="${CRED#*:}"
+
+    HOSTPORT="${HOSTPART%%/*}"           # host:port
+    DBPART="${HOSTPART#*/}"              # dbname?params
+
+    case "$HOSTPORT" in
+        *:*)
+            DB_HOST_VALUE="${HOSTPORT%:*}"
+            DB_PORT_VALUE="${HOSTPORT##*:}"
+            ;;
+        *)
+            DB_HOST_VALUE="$HOSTPORT"
+            DB_PORT_VALUE="5432"
+            ;;
+    esac
+
+    DB_NAME_VALUE="${DBPART%%\?*}"
+
+    # 处理 sslmode
+    case "$DATABASE_URL" in
+        *sslmode=require*) DB_SSL_VALUE="require" ;;
+        *sslmode=disable*) DB_SSL_VALUE="disable" ;;
+        *) DB_SSL_VALUE="require" ;;
+    esac
+fi
+
+cat > /tmp/openlist-data/config.json <<EOF
+{
+  "force": false,
+  "site_url": "${SITE_URL:-}",
+  "jwt_secret": "${JWT_SECRET:-infrlo-orkestr-openlist-please-change}",
+  "database": {
+    "type": "${DB_TYPE_VALUE}",
+    "host": "${DB_HOST_VALUE}",
+    "port": ${DB_PORT_VALUE},
+    "user": "${DB_USER_VALUE}",
+    "password": "${DB_PASS_VALUE}",
+    "name": "${DB_NAME_VALUE}",
+    "db_file": "/tmp/openlist-data/data.db",
+    "table_prefix": "x_",
+    "ssl_mode": "${DB_SSL_VALUE}",
+    "dsn": ""
+  },
+  "scheme": {
+    "address": "0.0.0.0",
+    "http_port": ${HTTP_PORT},
+    "https_port": -1,
+    "force_https": false
+  },
+  "temp_dir": "/tmp/openlist-temp",
+  "bleve_dir": "/tmp/openlist-bleve",
+  "log": {
+    "enable": true,
+    "name": "/tmp/openlist-data/log/log.log",
+    "max_size": 5,
+    "max_backups": 1,
+    "max_age": 1,
+    "compress": false,
+    "filter": { "enable": false, "filters": [] }
+  },
+  "max_concurrency": 16,
+  "tls_insecure_skip_verify": true
+}
+EOF
+
+echo "=== OpenList start ==="
+echo "PORT=${HTTP_PORT}"
+echo "DB_TYPE=${DB_TYPE_VALUE}"
+echo "DB_HOST=${DB_HOST_VALUE}"
+echo "DB_PORT=${DB_PORT_VALUE}"
+echo "DB_NAME=${DB_NAME_VALUE}"
+echo "======================"
+
+exec /opt/openlist/openlist server \
     --data /tmp/openlist-data \
+    --config /tmp/openlist-data/config.json \
+    --log-std \
     --no-prefix
